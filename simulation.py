@@ -103,6 +103,87 @@ class TrafficSimulation:
 
         print(f"[Simulation] Injected Platoon Burst of {size} vehicles at Upstream Corridor!")
 
+    def _generate_synthetic_traffic_frame(self, camera_id: str, frame_idx: int) -> np.ndarray:
+        """
+        Procedural animated urban traffic corridor generator.
+        Activates automatically whenever local video files are absent, unreadable,
+        or codec-restricted on cloud deployments. Ensures the live demo never fails.
+        """
+        h, w = 360, 640
+        frame = np.full((h, w, 3), (35, 38, 44), dtype=np.uint8)  # Road asphalt
+
+        # Road boundaries & sidewalks
+        road_x1, road_x2 = 60, 580
+        cv2.rectangle(frame, (road_x1, 0), (road_x2, h), (44, 49, 58), -1)
+        cv2.line(frame, (road_x1, 0), (road_x1, h), (240, 240, 240), 3)
+        cv2.line(frame, (road_x2, 0), (road_x2, h), (240, 240, 240), 3)
+
+        # 3 Lanes with animated dashed lane markings moving downward
+        lane_w = (road_x2 - road_x1) // 3
+        scroll = (frame_idx * 7) % 40
+
+        for lane_i in (1, 2):
+            lx = road_x1 + lane_i * lane_w
+            for y in range(-40 + scroll, h + 40, 40):
+                cv2.line(frame, (lx, y), (lx, y + 22), (230, 230, 230), 2)
+
+        # If Stop-Bar camera: render thick intersection stop line & pedestrian crosswalk
+        stop_y = int(h * 0.72)
+        if "STOPBAR" in camera_id or "CAM_2" in camera_id:
+            cv2.line(frame, (road_x1, stop_y), (road_x2, stop_y), (255, 255, 255), 5)
+            cv2.putText(frame, "STOP LINE", (road_x1 + 10, stop_y - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
+            for zx in range(road_x1 + 10, road_x2 - 20, 28):
+                cv2.rectangle(frame, (zx, stop_y + 10), (zx + 16, stop_y + 42), (220, 220, 220), -1)
+
+        # Moving vehicles with distinct colors, windows, headlights, and plates
+        palette = [
+            (210, 45, 45),   # Red car
+            (45, 120, 220),  # Blue sedan
+            (230, 230, 230), # Silver hatchback
+            (70, 75, 85),    # Dark SUV
+            (35, 175, 95),   # Green taxi
+            (235, 190, 30),  # Yellow cab
+        ]
+
+        for lane_idx in range(3):
+            lane_cx = road_x1 + int((lane_idx + 0.5) * lane_w)
+            base_speed = 6 + (lane_idx * 2)
+
+            for v_idx in range(2):
+                seed = lane_idx * 10 + v_idx
+                raw_y = (frame_idx * base_speed + v_idx * 190) % (h + 130) - 65
+
+                # Cam 2 queue deceleration near stop line if red
+                if ("STOPBAR" in camera_id or "CAM_2" in camera_id) and raw_y > (stop_y - 80):
+                    raw_y = min(stop_y - 35 - (v_idx * 55), raw_y)
+
+                is_bus = (seed % 4 == 0)
+                vw = 44 if not is_bus else 52
+                vh = 68 if not is_bus else 110
+                vx = lane_cx - vw // 2
+                vy = int(raw_y)
+
+                vcolor = palette[seed % len(palette)]
+
+                # Vehicle body & outline
+                cv2.rectangle(frame, (vx, vy), (vx + vw, vy + vh), vcolor, -1)
+                cv2.rectangle(frame, (vx, vy), (vx + vw, vy + vh), (15, 15, 15), 2)
+
+                # Windshield (front/back)
+                cv2.rectangle(frame, (vx + 4, vy + 10), (vx + vw - 4, vy + 22), (40, 50, 60), -1)
+                cv2.rectangle(frame, (vx + 4, vy + vh - 20), (vx + vw - 4, vy + vh - 9), (40, 50, 60), -1)
+
+                # Headlights (bottom facing) and tail lights
+                cv2.circle(frame, (vx + 8, vy + vh - 3), 3, (0, 0, 240), -1)
+                cv2.circle(frame, (vx + vw - 8, vy + vh - 3), 3, (0, 0, 240), -1)
+                cv2.circle(frame, (vx + 8, vy + 3), 3, (210, 240, 255), -1)
+                cv2.circle(frame, (vx + vw - 8, vy + 3), 3, (210, 240, 255), -1)
+
+                # License plate white badge
+                cv2.rectangle(frame, (vx + 8, vy + vh - 8), (vx + vw - 8, vy + vh - 2), (255, 255, 255), -1)
+
+        return frame
+
     def reset(self):
         """Reset simulation state."""
         self.sim_time = 0.0
@@ -134,23 +215,29 @@ class TrafficSimulation:
             self.cap1.set(cv2.CAP_PROP_POS_FRAMES, 0)
             ret1, frame1 = self.cap1.read()
 
-        if frame1 is not None:
+        if frame1 is not None and ret1:
             frame1 = cv2.resize(frame1, (640, 360))
+            self.using_synthetic_cam1 = False
         else:
-            frame1 = np.zeros((360, 640, 3), dtype=np.uint8)
+            frame1 = self._generate_synthetic_traffic_frame("CAM_1_UPSTREAM", self.frame_index)
+            self.using_synthetic_cam1 = True
 
         # -------------------------------------------------------------
         # 2. Read Cam 2 (Intersection Stop-Bar)
         # -------------------------------------------------------------
-        ret2, frame2 = self.cap2.read()
-        if not ret2:
-            self.cap2.set(cv2.CAP_PROP_POS_FRAMES, 0)
+        ret2, frame2 = False, None
+        if self.cap2.isOpened():
             ret2, frame2 = self.cap2.read()
+            if not ret2:
+                self.cap2.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                ret2, frame2 = self.cap2.read()
 
-        if frame2 is not None:
+        if frame2 is not None and ret2:
             frame2 = cv2.resize(frame2, (640, 360))
+            self.using_synthetic_cam2 = False
         else:
-            frame2 = np.zeros((360, 640, 3), dtype=np.uint8)
+            frame2 = self._generate_synthetic_traffic_frame("CAM_2_STOPBAR", self.frame_index)
+            self.using_synthetic_cam2 = True
 
         # -------------------------------------------------------------
         # 3. Vision Detection & ANPR
@@ -237,6 +324,8 @@ class TrafficSimulation:
             "signal_info": self.signal_controller.get_signal_display_info(),
             "metrics": self.tracker.get_metrics(),
             "decision_history": self.signal_controller.decision_history[:10],
+            "using_synthetic_cam1": getattr(self, "using_synthetic_cam1", False),
+            "using_synthetic_cam2": getattr(self, "using_synthetic_cam2", False),
         }
 
     def close(self):

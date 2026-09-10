@@ -140,7 +140,12 @@ with st.sidebar:
     st.header("⚙️ Simulation Settings")
 
     available_videos = list(config.VIDEOS_DIR.glob("*.mp4"))
-    video_names = [v.name for v in available_videos] if available_videos else ["traffic5.mp4", "traffice7.mp4"]
+    if available_videos:
+        st.success(f"🎥 {len(available_videos)} Video Datasets Loaded from videos/")
+        video_names = [v.name for v in available_videos]
+    else:
+        st.warning("⚠️ No video files found in `videos/` folder.\n\nRunning in **Autonomous Procedural Simulation Mode**!")
+        video_names = ["traffic5.mp4", "traffice7.mp4"]
 
     default_v1_idx = video_names.index("traffic5.mp4") if "traffic5.mp4" in video_names else 0
     default_v2_idx = video_names.index("traffice7.mp4") if "traffice7.mp4" in video_names else (1 if len(video_names) > 1 else 0)
@@ -152,6 +157,12 @@ with st.sidebar:
     v2_path = str(config.VIDEOS_DIR / sel_v2)
 
     conf_thresh = st.slider("YOLO Detection Confidence", 0.10, 0.60, 0.20, 0.05)
+    
+    col_play1, col_play2 = st.columns(2)
+    with col_play1:
+        is_paused = st.checkbox("⏸️ Pause", value=False)
+    with col_play2:
+        frame_delay = st.slider("Delay (s)", 0.04, 0.30, 0.10, 0.02)
     
     st.divider()
     st.subheader("🎯 Interactive Pitch Triggers")
@@ -267,13 +278,21 @@ col_feed, col_traj, col_signal = st.columns([1.35, 1.25, 0.95])
 # PANEL 1 (Left): Upstream & Stop-Bar Video Streams with ANPR Bounding Boxes
 with col_feed:
     st.subheader("📹 Panel 1: Edge Vision & ANPR Feeds")
-    tab_cam1, tab_cam2 = st.tabs(["Camera 1: Upstream (400m)", "Camera 2: Stop-Bar Line"])
 
-    with tab_cam1:
-        st.image(state["frame1_rgb"], use_container_width=True, caption=f"Upstream Corridor (400m before junction) | {len(state['cam1_detections'])} active detections")
+    if state.get("using_synthetic_cam1") or state.get("using_synthetic_cam2"):
+        st.info("💡 **Procedural Traffic Mode**: Running continuous synthetic arterial simulation.")
 
-    with tab_cam2:
-        st.image(state["frame2_rgb"], use_container_width=True, caption=f"Intersection Stop-Bar Line | {len(state['cam2_detections'])} vehicles queued")
+    cam_layout = st.radio("Camera Layout", ["Stacked (Both Visible)", "Tabs"], horizontal=True, index=0)
+
+    if cam_layout == "Stacked (Both Visible)":
+        st.image(state["frame1_rgb"], use_container_width=True, caption=f"Camera 1: Upstream (400m) | {len(state['cam1_detections'])} active detections")
+        st.image(state["frame2_rgb"], use_container_width=True, caption=f"Camera 2: Intersection Stop-Bar | {len(state['cam2_detections'])} vehicles queued")
+    else:
+        tab_cam1, tab_cam2 = st.tabs(["Camera 1: Upstream (400m)", "Camera 2: Stop-Bar Line"])
+        with tab_cam1:
+            st.image(state["frame1_rgb"], use_container_width=True, caption=f"Upstream Corridor (400m before junction) | {len(state['cam1_detections'])} active detections")
+        with tab_cam2:
+            st.image(state["frame2_rgb"], use_container_width=True, caption=f"Intersection Stop-Bar Line | {len(state['cam2_detections'])} vehicles queued")
 
     # Real-time scan list
     st.caption("🔍 **Live ANPR Plate Scans:**")
@@ -355,5 +374,6 @@ with col_signal:
 # ---------------------------------------------------------------------------
 # Continuous Refresh Loop for Live Demo Playback
 # ---------------------------------------------------------------------------
-time.sleep(0.08)
-st.rerun()
+if not is_paused:
+    time.sleep(frame_delay)
+    st.rerun()
