@@ -42,6 +42,51 @@ class VehicleDetector:
         self.model = YOLO(target_path)
         self.plate_pattern = re.compile(r"[^A-Z0-9]")
         self._plate_cache = {}  # Cache recognized/fallback plate per track_id
+        self._cam_centroids = {}
+        self._next_track_id = 1
+        self._use_track = True
+
+    def _assign_centroid_ids(self, camera_id: str, xyxy_boxes: list) -> list:
+        """
+        Centroid tracking fallback when lap/lapx is missing in headless cloud environments.
+        Matches bounding box centers to previous frame centroids within a distance threshold.
+        """
+        if camera_id not in self._cam_centroids:
+            self._cam_centroids[camera_id] = {}
+
+        prev = self._cam_centroids[camera_id]
+        curr_centroids = {}
+        assigned_ids = []
+        used_prev_ids = set()
+
+        for box in xyxy_boxes:
+            cx = (box[0] + box[2]) // 2
+            cy = (box[1] + box[3]) // 2
+
+            # Find closest previous centroid
+            best_id = None
+            best_dist = 110.0  # Max pixel movement between consecutive frames
+
+            for pid, (px, py) in prev.items():
+                if pid in used_prev_ids:
+                    continue
+                dist = ((cx - px) ** 2 + (cy - py) ** 2) ** 0.5
+                if dist < best_dist:
+                    best_dist = dist
+                    best_id = pid
+
+            if best_id is not None:
+                assigned_ids.append(best_id)
+                used_prev_ids.add(best_id)
+                curr_centroids[best_id] = (cx, cy)
+            else:
+                new_id = self._next_track_id
+                self._next_track_id += 1
+                assigned_ids.append(new_id)
+                curr_centroids[new_id] = (cx, cy)
+
+        self._cam_centroids[camera_id] = curr_centroids
+        return assigned_ids
 
     def extract_plate_roi(self, vehicle_crop):
         """
@@ -126,24 +171,45 @@ class VehicleDetector:
         if emergency_ids is None:
             emergency_ids = set()
 
-        results = self.model.track(
-            frame,
-            persist=True,
-            classes=list(config.VEHICLE_CLASSES.keys()),
-            conf=self.conf,
-            imgsz=self.imgsz,
-            verbose=False
-        )[0]
+        # Attempt YOLO tracking, with fallback to predict + centroid tracking if lap is missing
+        results = None
+        if getattr(self, "_use_track", True):
+            try:
+                results = self.model.track(
+                    frame,
+                    persist=True,
+                    classes=list(config.VEHICLE_CLASSES.keys()),
+                    conf=self.conf,
+                    imgsz=self.imgsz,
+                    verbose=False
+                )[0]
+            except Exception:
+                # lap or tracker dependency missing in host environment -> fall back gracefully
+                self._use_track = False
+
+        if results is None:
+            results = self.model.predict(
+                frame,
+                classes=list(config.VEHICLE_CLASSES.keys()),
+                conf=self.conf,
+                imgsz=self.imgsz,
+                verbose=False
+            )[0]
 
         detections = []
         h, w = frame.shape[:2]
 
         if results.boxes is not None and len(results.boxes) > 0:
             boxes = results.boxes
-            ids = boxes.id.int().cpu().tolist() if boxes.id is not None else list(range(len(boxes)))
             xyxy = boxes.xyxy.int().cpu().tolist()
             cls_ids = boxes.cls.int().cpu().tolist()
             confs = boxes.conf.cpu().tolist()
+
+            # If track IDs are available, use them; otherwise use robust centroid tracker
+            if boxes.id is not None:
+                ids = boxes.id.int().cpu().tolist()
+            else:
+                ids = self._assign_centroid_ids(camera_id, xyxy)
 
             for track_id, box, cls_id, det_conf in zip(ids, xyxy, cls_ids, confs):
                 if cls_id not in config.VEHICLE_CLASSES:
