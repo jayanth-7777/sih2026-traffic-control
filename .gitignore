@@ -1,0 +1,23 @@
+# Python Bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual Environments
+.venv/
+venv/
+env/
+ENV/
+
+# Testing & IDEs
+.pytest_cache/
+.vscode/
+.idea/
+*.log
+
+# Windows specific
+Thumbs.db
+Desktop.ini
+
+# Zip Archives (avoid pushing bulky zip into git)
+*.zip
